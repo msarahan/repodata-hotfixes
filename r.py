@@ -135,13 +135,13 @@ def _patch_repodata(repodata, subdir):
     instructions = {
         "patch_instructions_version": 1,
         "packages": defaultdict(dict),
+        "packages.conda": defaultdict(dict),
         "revoke": [],
         "remove": [],
     }
     if 'packages' not in repodata:
         return instructions
 
-    index = repodata["packages"]
     instructions["remove"].extend(REMOVALS.get(subdir, ()))
 
     if subdir == "noarch":
@@ -159,88 +159,90 @@ def _patch_repodata(repodata, subdir):
             depends[dep_idx] = new_name + remainder
             instructions["packages"][fn]['depends'] = depends
 
-    for fn, record in index.items():
-        record_name = record["name"]
-        if record_name in NAMESPACE_IN_NAME_SET and not record.get('namespace_in_name'):
-            # set the namespace_in_name field
-            instructions["packages"][fn]['namespace_in_name'] = True
-        if NAMESPACE_OVERRIDES.get(record_name):
-            # explicitly set namespace
-            instructions["packages"][fn]['namespace'] = NAMESPACE_OVERRIDES[record_name]
-        # ensure that all r/r-base/mro-base packages have the mutex
-        if record_name == "r-base":
-            if not any(dep.split()[0] == "_r_mutex" for dep in record['depends']):
-                if "_r-mutex 1.* anacondar_1" not in record['depends']:
+    for key in ('packages', 'packages.conda'):
+        index = repodata[key]
+        for fn, record in index.items():
+            record_name = record["name"]
+            if record_name in NAMESPACE_IN_NAME_SET and not record.get('namespace_in_name'):
+                # set the namespace_in_name field
+                instructions[key][fn]['namespace_in_name'] = True
+            if NAMESPACE_OVERRIDES.get(record_name):
+                # explicitly set namespace
+                instructions[key][fn]['namespace'] = NAMESPACE_OVERRIDES[record_name]
+            # ensure that all r/r-base/mro-base packages have the mutex
+            if record_name == "r-base":
+                if not any(dep.split()[0] == "_r_mutex" for dep in record['depends']):
+                    if "_r-mutex 1.* anacondar_1" not in record['depends']:
+                        record['depends'].append("_r-mutex 1.* anacondar_1")
+                    instructions[key][fn]["depends"] = record['depends']
+            elif record_name == "mro-base":
+                if not any(dep.split()[0] == "_r_mutex" for dep in record['depends']):
+                    if "_r-mutex 1.* mro_2" not in record['depends']:
+                        record['depends'].append("_r-mutex 1.* mro_2")
+                    instructions[key][fn]["depends"] = record['depends']
+            elif record_name == "_r-mutex":
+                flip_mutex_from_anacondar_to_mro(fn, record, instructions)
+            # None of the 3.1.2 builds used r-base, and none of them have the mutex
+            elif record_name == "r" and record['version'] == "3.1.2":
+                # less than build 3 was an actual package; no r-base connection.  These need the mutex.
+                if int(record["build_number"]) < 3:
+                    if "_r-mutex 1.* anacondar_1" not in record['depends']:
+                        record['depends'].append("_r-mutex 1.* anacondar_1")
+                    instructions[key][fn]["depends"] = record['depends']
+                else:
+                    # this dep was underspecified
+                    try:
+                        record['depends'].remove('r-base')
+                    except ValueError:
+                        pass
+                    record['depends'].append('r-base 3.1.2')
+                    instructions[key][fn]["depends"] = record['depends']
+
+            # cyclical dep here.  Everything should depend on r-base instead of r, as r brings in r-essentials
+            new_deps = []
+            for dep in record['depends']:
+                parts = dep.split()
+                if len(parts) > 1 and parts[0] == 'r':
+                    new_deps.append("r-base %s" % parts[1])
+                else:
+                    new_deps.append(dep)
+            record['depends'] = new_deps
+            instructions[key][fn]["depends"] = record['depends']
+
+            # try to attach mutex metapackages more directly
+            if not any(dep.split()[0] == "_r-mutex" for dep in record['depends']):
+                if any(dep.split()[0] == "r-base" for dep in record['depends']):
                     record['depends'].append("_r-mutex 1.* anacondar_1")
-                instructions["packages"][fn]["depends"] = record['depends']
-        elif record_name == "mro-base":
-            if not any(dep.split()[0] == "_r_mutex" for dep in record['depends']):
-                if "_r-mutex 1.* mro_2" not in record['depends']:
+                elif any(dep.split()[0] == "mro-base" for dep in record['depends']):
                     record['depends'].append("_r-mutex 1.* mro_2")
-                instructions["packages"][fn]["depends"] = record['depends']
-        elif record_name == "_r-mutex":
-            flip_mutex_from_anacondar_to_mro(fn, record, instructions)
-        # None of the 3.1.2 builds used r-base, and none of them have the mutex
-        elif record_name == "r" and record['version'] == "3.1.2":
-            # less than build 3 was an actual package; no r-base connection.  These need the mutex.
-            if int(record["build_number"]) < 3:
-                if "_r-mutex 1.* anacondar_1" not in record['depends']:
-                    record['depends'].append("_r-mutex 1.* anacondar_1")
-                instructions["packages"][fn]["depends"] = record['depends']
-            else:
-                # this dep was underspecified
-                try:
-                    record['depends'].remove('r-base')
-                except ValueError:
-                    pass
-                record['depends'].append('r-base 3.1.2')
-                instructions["packages"][fn]["depends"] = record['depends']
+                instructions[key][fn]["depends"] = record['depends']
 
-        # cyclical dep here.  Everything should depend on r-base instead of r, as r brings in r-essentials
-        new_deps = []
-        for dep in record['depends']:
-            parts = dep.split()
-            if len(parts) > 1 and parts[0] == 'r':
-                new_deps.append("r-base %s" % parts[1])
-            else:
-                new_deps.append(dep)
-        record['depends'] = new_deps
-        instructions["packages"][fn]["depends"] = record['depends']
+            if (any(fnmatch.fnmatch(fn, rev) for rev in REVOKED.get(subdir, [])) or
+                    any(fnmatch.fnmatch(fn, rev) for rev in REVOKED.get("any", []))):
+                instructions['revoke'].append(fn)
+            if (any(fnmatch.fnmatch(fn, rev) for rev in REMOVALS.get(subdir, [])) or
+                    any(fnmatch.fnmatch(fn, rev) for rev in REMOVALS.get("any", []))):
+                instructions['remove'].append(fn)
 
-        # try to attach mutex metapackages more directly
-        if not any(dep.split()[0] == "_r-mutex" for dep in record['depends']):
-            if any(dep.split()[0] == "r-base" for dep in record['depends']):
-                record['depends'].append("_r-mutex 1.* anacondar_1")
-            elif any(dep.split()[0] == "mro-base" for dep in record['depends']):
-                record['depends'].append("_r-mutex 1.* mro_2")
-            instructions["packages"][fn]["depends"] = record['depends']
+            if any(dep == 'mro-base' for dep in record.get('depends', [])):
+                deps = record['depends']
+                deps.remove('mro-base')
+                version = re.search(r".*\-.*mro(\d{3})", fn).group(1)
+                lb = '.'.join((_ for _ in version))
+                ub = '.'.join((_ for _ in str(int(version) + 10)))
+                ub = '.'.join(ub.split('.')[:2] + ['0'])
+                deps.append("mro-base >={},<{}a0".format(lb, ub))
+                instructions[key][fn]["depends"] = deps
 
-        if (any(fnmatch.fnmatch(fn, rev) for rev in REVOKED.get(subdir, [])) or
-                 any(fnmatch.fnmatch(fn, rev) for rev in REVOKED.get("any", []))):
-            instructions['revoke'].append(fn)
-        if (any(fnmatch.fnmatch(fn, rev) for rev in REMOVALS.get(subdir, [])) or
-                 any(fnmatch.fnmatch(fn, rev) for rev in REMOVALS.get("any", []))):
-            instructions['remove'].append(fn)
-
-        if any(dep == 'mro-base' for dep in record.get('depends', [])):
-            deps = record['depends']
-            deps.remove('mro-base')
-            version = re.search(r".*\-.*mro(\d{3})", fn).group(1)
-            lb = '.'.join((_ for _ in version))
-            ub = '.'.join((_ for _ in str(int(version) + 10)))
-            ub = '.'.join(ub.split('.')[:2] + ['0'])
-            deps.append("mro-base >={},<{}a0".format(lb, ub))
-            instructions["packages"][fn]["depends"] = deps
-
-        if any(dep == 'r-base' for dep in record.get('depends', [])):
-            deps = record['depends']
-            deps.remove('r-base')
-            version = re.search(r".*\-.*r(\d{3})", fn).group(1)
-            lb = '.'.join((_ for _ in version))
-            ub = '.'.join((_ for _ in str(int(version) + 10)))
-            ub = '.'.join(ub.split('.')[:2] + ['0'])
-            deps.append("r-base >={},<{}a0".format(lb, ub))
-            instructions["packages"][fn]["depends"] = deps
+            if any(dep == 'r-base' for dep in record.get('depends', [])):
+                deps = record['depends']
+                deps.remove('r-base')
+                version = re.search(r".*\-.*r(\d{3})", fn).group(1)
+                lb = '.'.join((_ for _ in version))
+                ub = '.'.join((_ for _ in str(int(version) + 10)))
+                ub = '.'.join(ub.split('.')[:2] + ['0'])
+                deps.append("r-base >={},<{}a0".format(lb, ub))
+                instructions[key][fn]["depends"] = deps
 
     return instructions
 

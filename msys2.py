@@ -55,10 +55,10 @@ NAMESPACE_OVERRIDES = {
 
 
 def _patch_repodata(repodata, subdir):
-    index = repodata["packages"]
     instructions = {
         "patch_instructions_version": 1,
         "packages": defaultdict(dict),
+        "packages.conda": defaultdict(dict),
         "revoke": [],
         "remove": [],
     }
@@ -80,14 +80,16 @@ def _patch_repodata(repodata, subdir):
             depends[dep_idx] = new_name + remainder
             instructions["packages"][fn]['depends'] = depends
 
-    for fn, record in index.items():
-        record_name = record["name"]
-        if record_name in NAMESPACE_IN_NAME_SET and not record.get('namespace_in_name'):
-            # set the namespace_in_name field
-            instructions["packages"][fn]['namespace_in_name'] = True
-        if NAMESPACE_OVERRIDES.get(record_name):
-            # explicitly set namespace
-            instructions["packages"][fn]['namespace'] = NAMESPACE_OVERRIDES[record_name]
+    for key in ('packages', 'packages.conda'):
+        index = repodata[key]
+        for fn, record in index.items():
+            record_name = record["name"]
+            if record_name in NAMESPACE_IN_NAME_SET and not record.get('namespace_in_name'):
+                # set the namespace_in_name field
+                instructions[key][fn]['namespace_in_name'] = True
+            if NAMESPACE_OVERRIDES.get(record_name):
+                # explicitly set namespace
+                instructions[key][fn]['namespace'] = NAMESPACE_OVERRIDES[record_name]
 
     return instructions
 
